@@ -40,6 +40,10 @@ def _migrate(conn):
         conn.execute("ALTER TABLE sbom_items ADD COLUMN purl TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
+    if "host" not in sbom_cols:
+        conn.execute("ALTER TABLE sbom_items ADD COLUMN host TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
 
 def init_db():
     with _get_conn() as conn:
@@ -117,12 +121,17 @@ def set_setting(key, value):
 # SBOM items
 # ---------------------------------------------------------------------------
 
-def get_sbom_items(active_only=False):
-    q = "SELECT * FROM sbom_items"
+def get_sbom_items(active_only=False, host=None):
+    conditions = []
+    params = []
     if active_only:
-        q += " WHERE active=1"
-    q += " ORDER BY vendor, name"
-    return [dict(r) for r in _get_conn().execute(q).fetchall()]
+        conditions.append("active=1")
+    if host:
+        conditions.append("host=?")
+        params.append(host)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    q = f"SELECT * FROM sbom_items {where} ORDER BY host, vendor, name"
+    return [dict(r) for r in _get_conn().execute(q, params).fetchall()]
 
 
 def get_sbom_item(item_id):
@@ -130,21 +139,21 @@ def get_sbom_item(item_id):
     return dict(row) if row else None
 
 
-def add_sbom_item(name, vendor, version, item_type, cpe, purl, notes):
+def add_sbom_item(name, vendor, version, item_type, cpe, purl, host, notes):
     with _get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO sbom_items (name, vendor, version, item_type, cpe, purl, notes) VALUES (?,?,?,?,?,?,?)",
-            (name.strip(), vendor.strip(), version.strip(), item_type.strip(), cpe.strip(), purl.strip(), notes.strip())
+            "INSERT INTO sbom_items (name, vendor, version, item_type, cpe, purl, host, notes) VALUES (?,?,?,?,?,?,?,?)",
+            (name.strip(), vendor.strip(), version.strip(), item_type.strip(), cpe.strip(), purl.strip(), host.strip(), notes.strip())
         )
         conn.commit()
         return cur.lastrowid
 
 
-def update_sbom_item(item_id, name, vendor, version, item_type, cpe, purl, notes):
+def update_sbom_item(item_id, name, vendor, version, item_type, cpe, purl, host, notes):
     with _get_conn() as conn:
         conn.execute(
-            "UPDATE sbom_items SET name=?, vendor=?, version=?, item_type=?, cpe=?, purl=?, notes=?, updated_at=datetime('now') WHERE id=?",
-            (name.strip(), vendor.strip(), version.strip(), item_type.strip(), cpe.strip(), purl.strip(), notes.strip(), item_id)
+            "UPDATE sbom_items SET name=?, vendor=?, version=?, item_type=?, cpe=?, purl=?, host=?, notes=?, updated_at=datetime('now') WHERE id=?",
+            (name.strip(), vendor.strip(), version.strip(), item_type.strip(), cpe.strip(), purl.strip(), host.strip(), notes.strip(), item_id)
         )
         conn.commit()
 
@@ -154,6 +163,14 @@ def get_sbom_items_with_purl():
         "SELECT * FROM sbom_items WHERE active=1 AND purl != '' ORDER BY vendor, name"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_hosts():
+    """Return distinct non-empty host values."""
+    rows = _get_conn().execute(
+        "SELECT DISTINCT host FROM sbom_items WHERE host != '' ORDER BY host"
+    ).fetchall()
+    return [r[0] for r in rows]
 
 
 def delete_sbom_item(item_id):
@@ -259,7 +276,7 @@ def get_matches(status=None, limit=300):
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     rows = _get_conn().execute(f"""
         SELECT m.*, s.name as item_name, s.vendor as item_vendor, s.version as item_version,
-               s.item_type, c.cvss_score, c.severity, c.description as cve_description,
+               s.item_type, s.host as item_host, c.cvss_score, c.severity, c.description as cve_description,
                c.kev, c.published, c.epss, c.epss_percentile
         FROM matches m
         JOIN sbom_items s ON m.sbom_item_id = s.id
