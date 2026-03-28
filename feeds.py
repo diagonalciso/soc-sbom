@@ -69,13 +69,25 @@ def _parse_nvd_item(item):
     published = item.get("cve", {}).get("published", "")
     modified  = item.get("cve", {}).get("lastModified", "")
 
-    # CPE list
-    cpe_list = []
+    # CPE list + fix versions
+    cpe_list     = []
+    fix_versions = []   # [{vendor, product, fix_version}]
     for config in item.get("cve", {}).get("configurations", []):
         for node in config.get("nodes", []):
             for cpe_match in node.get("cpeMatch", []):
-                if cpe_match.get("vulnerable"):
-                    cpe_list.append(cpe_match.get("criteria", ""))
+                if not cpe_match.get("vulnerable"):
+                    continue
+                criteria = cpe_match.get("criteria", "")
+                cpe_list.append(criteria)
+                fix = cpe_match.get("versionEndExcluding") or cpe_match.get("versionEndIncluding")
+                if fix:
+                    parts = criteria.split(":")
+                    fix_versions.append({
+                        "vendor":      parts[3].replace("_", " ") if len(parts) > 3 else "",
+                        "product":     parts[4].replace("_", " ") if len(parts) > 4 else "",
+                        "fix_version": fix,
+                        "exclusive":   bool(cpe_match.get("versionEndExcluding")),
+                    })
 
     # Affected products: extract vendor+product from CPEs
     products = []
@@ -97,16 +109,17 @@ def _parse_nvd_item(item):
             unique_products.append(p)
 
     return {
-        "cve_id": cve_id,
-        "description": desc,
-        "cvss_score": cvss_score,
+        "cve_id":       cve_id,
+        "description":  desc,
+        "cvss_score":   cvss_score,
         "cvss_version": cvss_version,
-        "severity": severity.upper(),
-        "published": published,
-        "modified": modified,
-        "source": "nvd",
-        "cpe_list": cpe_list,
-        "products": unique_products,
+        "severity":     severity.upper(),
+        "published":    published,
+        "modified":     modified,
+        "source":       "nvd",
+        "cpe_list":     cpe_list,
+        "products":     unique_products,
+        "fix_versions": fix_versions,
     }
 
 
@@ -293,8 +306,24 @@ def _osv_post(url, payload, timeout=30):
         return json.loads(r.read())
 
 
+def _versioned_purl(purl, version):
+    """Return purl with version embedded. OSV uses this for version-aware matching.
+    If purl already contains '@', leave it as-is (version already set).
+    """
+    if not purl:
+        return purl
+    if "@" in purl:
+        return purl          # version already in purl
+    if version:
+        return f"{purl}@{version}"
+    return purl
+
+
 def fetch_osv():
-    """Query OSV for SBOM items that have a purl set. Covers GHSA and 20+ ecosystems."""
+    """Query OSV for SBOM items that have a purl set. Covers GHSA and 20+ ecosystems.
+    Includes version in purl so OSV only returns CVEs affecting that specific version.
+    Items without a version get all CVEs for the package (conservative fallback).
+    """
     items = db.get_sbom_items_with_purl()
     if not items:
         print("[osv] no SBOM items with purl — skipping")
@@ -302,8 +331,8 @@ def fetch_osv():
 
     print(f"[osv] querying {len(items)} items with purl")
 
-    # Build batch query — OSV supports up to 1000 queries per batch
-    queries = [{"package": {"purl": item["purl"]}} for item in items]
+    # Build batch query — include version so OSV scopes results to that version
+    queries = [{"package": {"purl": _versioned_purl(item["purl"], item.get("version", ""))}} for item in items]
     try:
         resp = _osv_post("https://api.osv.dev/v1/querybatch", {"queries": queries})
     except Exception as e:
@@ -342,8 +371,9 @@ def fetch_osv():
                 )
                 new_vulns += 1
 
-            # Direct match — OSV confirmed this purl is affected
-            if db.add_match(item["id"], cve_id, f"OSV purl match: {item['purl']}"):
+            # Direct match — OSV confirmed this purl+version is affected
+            vpurl = _versioned_purl(item["purl"], item.get("version", ""))
+            if db.add_match(item["id"], cve_id, f"OSV purl match: {vpurl}"):
                 new_matches += 1
 
     db.set_setting("osv_last_run", _now_iso())
@@ -415,11 +445,97 @@ def run_matcher():
     return new_matches
 
 
+def enrich_cve_scores(limit=100, matched_only=False):
+    """Fetch CVSS scores from NVD for CVEs currently stored with score=0.0.
+    Runs matched CVEs first. Uses a per-request delay to respect NVD rate limits.
+    """
+    cve_ids = db.get_cves_needing_enrichment(limit=limit, matched_only=matched_only)
+    if not cve_ids:
+        print("[enrich] no CVEs need score enrichment")
+        return 0
+
+    print(f"[enrich] fetching scores for {len(cve_ids)} CVEs from NVD")
+    delay  = 1 if NVD_API_KEY else 6   # NVD: 50/30s with key, 5/30s without
+    updated = 0
+
+    for cve_id in cve_ids:
+        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
+        try:
+            data  = _get(url, headers=_nvd_headers(), timeout=30)
+            items = data.get("vulnerabilities", [])
+            if not items:
+                time.sleep(delay)
+                continue
+            parsed = _parse_nvd_item(items[0])
+            if parsed["cvss_score"] > 0 or parsed["fix_versions"]:
+                db.update_cve_score(
+                    cve_id,
+                    parsed["cvss_score"],
+                    parsed["cvss_version"],
+                    parsed["severity"],
+                    parsed["cpe_list"],
+                    parsed["products"],
+                    parsed["modified"],
+                    parsed["fix_versions"],
+                )
+                updated += 1
+        except Exception as e:
+            print(f"[enrich] {cve_id}: {e}")
+        time.sleep(delay)
+
+    print(f"[enrich] updated scores for {updated} CVEs")
+    return updated
+
+
+def enrich_fix_versions(limit=100):
+    """Fetch NVD version range data for CVEs that have scores but no fix_versions yet."""
+    cve_ids = db.get_cves_needing_fix_versions(limit=limit)
+    if not cve_ids:
+        print("[fix-ver] all CVEs already have version range data")
+        return 0
+
+    print(f"[fix-ver] fetching version ranges for {len(cve_ids)} CVEs")
+    delay   = 1 if NVD_API_KEY else 6
+    updated = 0
+
+    for cve_id in cve_ids:
+        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
+        try:
+            data   = _get(url, headers=_nvd_headers(), timeout=30)
+            items  = data.get("vulnerabilities", [])
+            if not items:
+                time.sleep(delay)
+                continue
+            parsed = _parse_nvd_item(items[0])
+            db.update_cve_score(
+                cve_id,
+                parsed["cvss_score"] or db.get_cve(cve_id)["cvss_score"],
+                parsed["cvss_version"] or db.get_cve(cve_id)["cvss_version"],
+                parsed["severity"]    or db.get_cve(cve_id)["severity"],
+                parsed["cpe_list"],
+                parsed["products"],
+                parsed["modified"],
+                parsed["fix_versions"],
+            )
+            updated += 1
+        except Exception as e:
+            print(f"[fix-ver] {cve_id}: {e}")
+        time.sleep(delay)
+
+    print(f"[fix-ver] updated version ranges for {updated} CVEs")
+    return updated
+
+
 def run_all():
-    """Full feed run: NVD → KEV → EPSS → OSV → matcher."""
+    """Full feed run: NVD → KEV → EPSS → OSV → enrich → fix versions → matcher."""
     fetch_nvd(since_days=2)
     fetch_kev()
     fetch_epss()
     fetch_osv()
+    enrich_cve_scores(limit=100)
+    enrich_fix_versions(limit=100)
     run_matcher()
+    purged = db.purge_unmatched_cves()
+    if purged:
+        print(f"[feeds] purged {purged} CVEs with no SBOM matches")
     db.set_setting("last_feed_run", _now_iso())

@@ -49,6 +49,80 @@ def _params(path):
     return path, {}
 
 
+def _parse_sbom(data, host):
+    """Parse CycloneDX JSON, SPDX JSON, or a plain list into SBOM item dicts."""
+    items = []
+
+    # --- CycloneDX ---
+    if isinstance(data, dict) and (data.get("bomFormat") == "CycloneDX" or "components" in data):
+        def _walk(components):
+            for c in components or []:
+                vendor = ""
+                for key in ("supplier", "manufacturer", "publisher"):
+                    v = c.get(key)
+                    if isinstance(v, dict):
+                        vendor = v.get("name", "")
+                    elif isinstance(v, str):
+                        vendor = v
+                    if vendor:
+                        break
+                items.append({
+                    "name":      c.get("name", ""),
+                    "vendor":    vendor,
+                    "version":   c.get("version", ""),
+                    "item_type": c.get("type", "library"),
+                    "cpe":       c.get("cpe", ""),
+                    "purl":      c.get("purl", ""),
+                    "notes":     c.get("description", ""),
+                })
+                _walk(c.get("components", []))  # nested components
+        _walk(data.get("components", []))
+
+    # --- SPDX ---
+    elif isinstance(data, dict) and "spdxVersion" in data:
+        for pkg in data.get("packages", []):
+            purl = ""
+            cpe  = ""
+            for ref in pkg.get("externalRefs", []):
+                rt = ref.get("referenceType", "")
+                rl = ref.get("referenceLocator", "")
+                if rt == "purl":
+                    purl = rl
+                elif "cpe" in rt.lower():
+                    cpe = rl
+            supplier = pkg.get("supplier", "")
+            for prefix in ("Organization:", "Person:", "Tool:"):
+                if supplier.startswith(prefix):
+                    supplier = supplier[len(prefix):].strip()
+                    break
+            items.append({
+                "name":      pkg.get("name", ""),
+                "vendor":    supplier,
+                "version":   pkg.get("versionInfo", ""),
+                "item_type": "library",
+                "cpe":       cpe,
+                "purl":      purl,
+                "notes":     pkg.get("comment", ""),
+            })
+
+    # --- plain list [{name, version, ...}] ---
+    elif isinstance(data, list):
+        for c in data:
+            if not isinstance(c, dict):
+                continue
+            items.append({
+                "name":      c.get("name", c.get("product", "")),
+                "vendor":    c.get("vendor", c.get("supplier", c.get("manufacturer", ""))),
+                "version":   c.get("version", ""),
+                "item_type": c.get("type", c.get("item_type", "library")),
+                "cpe":       c.get("cpe", ""),
+                "purl":      c.get("purl", ""),
+                "notes":     c.get("notes", c.get("description", "")),
+            })
+
+    return items
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -86,6 +160,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif path == "/api/hosts":
             self._json(200, db.get_hosts())
+
+        elif path == "/api/hosts/delete":
+            name = params.get("name", "")
+            if name:
+                db.delete_host(name)
+            self._json(200, {"ok": True})
 
         elif path == "/api/cves":
             min_score = float(params.get("min_score", "0"))
@@ -153,6 +233,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self._json(400, {"error": "invalid action"})
 
+        elif re.match(r"^/api/sbom/\d+/fp-all$", path):
+            item_id = int(path.split("/")[-2])
+            n = db.bulk_update_matches_for_item(item_id, "new", "fp")
+            self._json(200, {"marked": n})
+
+        elif path == "/api/hosts":
+            name = body.get("name", "").strip()
+            if name:
+                db.add_host(name)
+            self._json(200, {"ok": True})
+
         elif path == "/api/sbom/verify-all":
             db.verify_all_sbom_items()
             self._json(200, {"ok": True})
@@ -161,6 +252,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             item_id = int(path.split("/")[-2])
             db.verify_sbom_item(item_id)
             self._json(200, {"ok": True})
+
+        elif path == "/api/sbom/import":
+            host     = body.get("host", "").strip()
+            sbom     = body.get("sbom", {})
+            filepath = body.get("file", "").strip()
+            if filepath:
+                try:
+                    with open(os.path.expanduser(filepath), "r", encoding="utf-8") as f:
+                        sbom = json.load(f)
+                except FileNotFoundError:
+                    self._json(404, {"error": f"File not found: {filepath}"}); return
+                except Exception as e:
+                    self._json(400, {"error": str(e)}); return
+            items    = _parse_sbom(sbom, host)
+            imported = 0
+            for it in items:
+                if not it.get("name"):
+                    continue
+                db.add_sbom_item(
+                    it["name"], it["vendor"], it["version"],
+                    it["item_type"], it["cpe"], it["purl"], host, it["notes"]
+                )
+                imported += 1
+            if host:
+                db.add_host(host)
+            threading.Thread(target=feeds.run_matcher, daemon=True).start()
+            self._json(200, {"imported": imported})
 
         elif path == "/api/feed/run":
             threading.Thread(target=feeds.run_all, daemon=True).start()
@@ -281,6 +399,28 @@ FOOTER = """
 function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML;}
 function fmtScore(n){const cls=n>=9?'critical':n>=7?'high':n>=4?'medium':'low';return`<span class="score ${cls}">${n.toFixed(1)}</span>`;}
 function fmtEpss(n){if(!n)return'<span style="color:var(--muted)">—</span>';const pct=Math.round(n*100);const cls=n>=0.5?'color:var(--red)':n>=0.2?'color:var(--orange)':'color:var(--muted)';return`<span style="font-weight:700;${cls}">${pct}%</span>`;}
+
+function _parsever(v){
+  if(!v)return[];
+  return String(v).split(/[.\-_]/).map(p=>{const n=parseInt(p);return isNaN(n)?0:n;});
+}
+function _vercmp(a,b){
+  const av=_parsever(a),bv=_parsever(b);
+  const len=Math.max(av.length,bv.length);
+  for(let i=0;i<len;i++){const d=(av[i]||0)-(bv[i]||0);if(d!==0)return d;}
+  return 0;
+}
+function fmtVerdict(itemVersion, fixVersionsJson){
+  if(!itemVersion)return'<span style="font-size:10px;color:var(--muted)" title="Add version to SBOM item to check">? No version</span>';
+  let fixes=[];
+  try{fixes=JSON.parse(fixVersionsJson||'[]');}catch(e){}
+  if(!fixes.length)return'<span style="font-size:10px;color:var(--muted)" title="NVD has no version range data for this CVE">? Unknown</span>';
+  // If installed version >= fix_version on any range → patched
+  const patched=fixes.some(f=>f.exclusive?_vercmp(itemVersion,f.fix_version)>=0:_vercmp(itemVersion,f.fix_version)>0);
+  const fixStr=fixes.map(f=>f.fix_version).filter((v,i,a)=>a.indexOf(v)===i).join(', ');
+  if(patched)return`<span style="font-size:10px;color:var(--green);font-weight:700" title="Fixed in ${fixStr} — your version ${itemVersion} is newer">✓ Patched</span>`;
+  return`<span style="font-size:10px;color:var(--red);font-weight:700" title="Fix version: ${fixStr} — your version ${itemVersion}">✗ Affected</span>`;
+}
 function sevCls(s){return(s||'').toLowerCase();}
 function runFeed(){
   fetch('/api/feed/run',{method:'POST'}).then(()=>{
@@ -385,9 +525,23 @@ def _page_sbom():
         <option value="">All devices</option>
       </select>
       <button class="btn" onclick="verifyAll()">✓ Mark All Up to Date</button>
+      <button class="btn" onclick="openImport()">⬆ Import SBOM</button>
       <button class="btn primary" onclick="openAdd()">+ Add Item</button>
     </div>
   </div>
+
+  <div class="card" style="margin-bottom:16px;padding:12px 18px;">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);">Devices</span>
+      <div id="host-chips" style="display:flex;flex-wrap:wrap;gap:6px;flex:1;"></div>
+      <div style="display:flex;gap:6px;">
+        <input id="new-host" placeholder="Add device…" style="width:180px;padding:5px 10px;font-size:12px;" onkeydown="if(event.key==='Enter')addHost()"/>
+        <button class="btn small primary" onclick="addHost()">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <datalist id="host-list"></datalist>
   <div class="card">
     <div id="sbom-table"><div class="empty">Loading…</div></div>
   </div>
@@ -411,7 +565,7 @@ def _page_sbom():
         <option value="other">Other</option>
       </select>
     </div>
-    <div class="form-row"><label>Host / Device</label><input id="f-host" placeholder="e.g. dc01, fw-panos-01, workstation-finance"/></div>
+    <div class="form-row"><label>Host / Device</label><input id="f-host" list="host-list" placeholder="e.g. dc01, fw-panos-01, workstation-finance"/></div>
     <div class="form-row"><label>CPE (optional — improves matching for commercial software)</label><input id="f-cpe" placeholder="e.g. cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*"/></div>
     <div class="form-row"><label>purl (optional — improves matching for open source packages)</label><input id="f-purl" placeholder="e.g. pkg:pypi/requests@2.28.0 or pkg:npm/lodash@4.17.21"/></div>
     <div class="form-row"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes"></textarea></div>
@@ -422,15 +576,75 @@ def _page_sbom():
   </div>
 </div>
 
+<!-- Import modal -->
+<div class="modal-overlay" id="import-modal">
+  <div class="modal" style="width:600px;">
+    <h2>Import SBOM</h2>
+    <div class="form-row">
+      <label>Host / Device *</label>
+      <select id="import-host-sel" onchange="importHostChange()" style="margin-bottom:6px;">
+        <option value="">— select a device —</option>
+      </select>
+      <input id="import-host-new" placeholder="Type new hostname…" style="display:none;"/>
+    </div>
+    <div style="display:flex;gap:0;margin-bottom:12px;border-bottom:1px solid var(--border);">
+      <button class="import-tab active" data-tab="file" onclick="switchTab('file')" style="padding:6px 16px;background:none;border:none;border-bottom:2px solid var(--accent);color:var(--accent);cursor:pointer;font-size:13px;font-weight:600;">File Path</button>
+      <button class="import-tab" data-tab="paste" onclick="switchTab('paste')" style="padding:6px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;font-size:13px;font-weight:600;">Paste JSON</button>
+    </div>
+    <div id="tab-file" class="form-row">
+      <label>Path to SBOM file on this machine</label>
+      <input id="import-path" placeholder="/home/user/sbom.json" oninput="previewImport()"/>
+    </div>
+    <div id="tab-paste" class="form-row" style="display:none;">
+      <label>SBOM JSON — CycloneDX, SPDX, or plain array</label>
+      <textarea id="import-json" rows="10" placeholder='{"bomFormat":"CycloneDX","components":[...]}'
+        style="font-family:monospace;font-size:12px;" oninput="previewImport()"></textarea>
+    </div>
+    <div id="import-preview" style="font-size:12px;color:var(--muted);margin-bottom:12px;min-height:18px;"></div>
+    <div class="form-actions">
+      <button class="btn" onclick="closeImport()">Cancel</button>
+      <button class="btn primary" id="import-btn" onclick="doImport()">Import</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let _editId = null;
 
 function loadHosts(){
   fetch('/api/hosts').then(r=>r.json()).then(hosts=>{
+    // filter dropdown
     const sel=document.getElementById('host-filter');
     const cur=sel.value;
     sel.innerHTML='<option value="">All devices</option>'+hosts.map(h=>`<option value="${esc(h)}"${h===cur?' selected':''}>${esc(h)}</option>`).join('');
+    // chips
+    const chips=document.getElementById('host-chips');
+    chips.innerHTML=hosts.length?hosts.map(h=>`<span style="display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;">
+      <span style="color:var(--accent);cursor:pointer" onclick="filterHost('${esc(h)}')">${esc(h)}</span>
+      <span style="color:var(--muted);cursor:pointer;font-size:10px" onclick="removeHost('${esc(h)}')" title="Remove">✕</span>
+    </span>`).join(''):'<span style="font-size:12px;color:var(--muted)">No devices added yet.</span>';
+    // datalist for form autocomplete
+    document.getElementById('host-list').innerHTML=hosts.map(h=>`<option value="${esc(h)}">`).join('');
   });
+}
+
+function addHost(){
+  const inp=document.getElementById('new-host');
+  const name=inp.value.trim();
+  if(!name)return;
+  fetch('/api/hosts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})})
+    .then(()=>{inp.value='';loadHosts();});
+}
+
+function removeHost(name){
+  if(!confirm('Remove device "'+name+'"? This does not remove it from SBOM items.'))return;
+  fetch('/api/hosts/delete?name='+encodeURIComponent(name))
+    .then(()=>loadHosts());
+}
+
+function filterHost(name){
+  document.getElementById('host-filter').value=name;
+  loadSBOM();
 }
 
 function loadSBOM(){
@@ -519,8 +733,113 @@ function verifyAll(){
   fetch('/api/sbom/verify-all',{method:'POST'}).then(()=>loadSBOM());
 }
 
+let _importTab = 'file';
+
+function switchTab(tab){
+  _importTab=tab;
+  document.querySelectorAll('.import-tab').forEach(b=>{
+    const active=b.dataset.tab===tab;
+    b.style.color=active?'var(--accent)':'var(--muted)';
+    b.style.borderBottom=active?'2px solid var(--accent)':'2px solid transparent';
+  });
+  document.getElementById('tab-file').style.display=tab==='file'?'':'none';
+  document.getElementById('tab-paste').style.display=tab==='paste'?'':'none';
+  document.getElementById('import-preview').textContent='';
+}
+
+function importHostChange(){
+  const sel=document.getElementById('import-host-sel');
+  const inp=document.getElementById('import-host-new');
+  inp.style.display=sel.value==='__new__'?'':'none';
+  if(sel.value==='__new__')inp.focus();
+}
+
+function _importHostValue(){
+  const sel=document.getElementById('import-host-sel');
+  if(sel.value==='__new__') return document.getElementById('import-host-new').value.trim();
+  return sel.value;
+}
+
+function openImport(){
+  document.getElementById('import-json').value='';
+  document.getElementById('import-path').value='';
+  document.getElementById('import-host-new').value='';
+  document.getElementById('import-host-new').style.display='none';
+  document.getElementById('import-preview').textContent='';
+  // populate host select
+  fetch('/api/hosts').then(r=>r.json()).then(hosts=>{
+    const sel=document.getElementById('import-host-sel');
+    sel.innerHTML='<option value="">— select a device —</option>'+
+      hosts.map(h=>`<option value="${esc(h)}">${esc(h)}</option>`).join('')+
+      '<option value="__new__">+ New device…</option>';
+    sel.value='';
+  });
+  switchTab('file');
+  document.getElementById('import-modal').classList.add('show');
+  document.getElementById('import-host-sel').focus();
+}
+
+function closeImport(){document.getElementById('import-modal').classList.remove('show');}
+
+function previewImport(){
+  const prev=document.getElementById('import-preview');
+  if(_importTab==='file'){
+    const p=document.getElementById('import-path').value.trim();
+    prev.innerHTML=p?'<span style="color:var(--muted)">File will be read from server on import.</span>':'';
+    return;
+  }
+  const raw=document.getElementById('import-json').value.trim();
+  if(!raw){prev.textContent='';return;}
+  try{
+    const data=JSON.parse(raw);
+    let count=0, fmt='';
+    if(data.bomFormat==='CycloneDX'||(data.components&&Array.isArray(data.components))){
+      count=(data.components||[]).length; fmt='CycloneDX';
+    } else if(data.spdxVersion){
+      count=(data.packages||[]).length; fmt='SPDX';
+    } else if(Array.isArray(data)){
+      count=data.length; fmt='Plain array';
+    } else {
+      prev.innerHTML='<span style="color:var(--orange)">⚠ Unrecognised format — will attempt import</span>'; return;
+    }
+    prev.innerHTML=`<span style="color:var(--green)">✓ ${fmt} — ${count} component(s) found</span>`;
+  } catch(e){
+    prev.innerHTML='<span style="color:var(--red)">✗ Invalid JSON: '+esc(e.message)+'</span>';
+  }
+}
+
+function doImport(){
+  const host=_importHostValue();
+  if(!host){alert('Please select or enter a host / device name.');return;}
+  const btn=document.getElementById('import-btn');
+  const prev=document.getElementById('import-preview');
+  btn.disabled=true;
+  prev.innerHTML='<span style="color:var(--muted)">Importing…</span>';
+
+  let payload={host};
+  if(_importTab==='file'){
+    const fp=document.getElementById('import-path').value.trim();
+    if(!fp){alert('Please enter a file path.');btn.disabled=false;return;}
+    payload.file=fp;
+  } else {
+    const raw=document.getElementById('import-json').value.trim();
+    try{payload.sbom=JSON.parse(raw);}catch(e){alert('Invalid JSON.');btn.disabled=false;return;}
+  }
+
+  fetch('/api/sbom/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    .then(r=>r.json()).then(d=>{
+      btn.disabled=false;
+      if(d.error){prev.innerHTML=`<span style="color:var(--red)">✗ ${esc(d.error)}</span>`;return;}
+      closeImport();
+      loadHosts();
+      loadSBOM();
+      alert(`Imported ${d.imported} item(s) to "${host}".`);
+    });
+}
+
 document.addEventListener('DOMContentLoaded', ()=>{loadHosts();loadSBOM();});
 document.getElementById('modal').addEventListener('click', function(e){if(e.target===this)closeModal();});
+document.getElementById('import-modal').addEventListener('click', function(e){if(e.target===this)closeImport();});
 </script>
 """ + FOOTER
 
@@ -608,27 +927,58 @@ function loadMatches(){
   fetch('/api/matches?status='+_filter).then(r=>r.json()).then(rows=>{
     const el=document.getElementById('match-table');
     if(!rows.length){el.innerHTML='<div class="empty">No matches.</div>';return;}
-    el.innerHTML=`<table><thead><tr><th>SBOM Item</th><th>Host</th><th>CVE</th><th>CVSS</th><th>EPSS</th><th>Severity</th><th>KEV</th><th>Match Reason</th><th>Status</th><th></th></tr></thead><tbody>`+
-      rows.map(r=>`<tr>
-        <td>
-          <strong>${esc(r.item_name)}</strong><br>
-          <span style="font-size:11px;color:var(--muted)">${esc(r.item_vendor)} ${esc(r.item_version)}</span>
+
+    // Group by sbom_item_id
+    const groups={};
+    rows.forEach(r=>{
+      if(!groups[r.sbom_item_id]) groups[r.sbom_item_id]={item:r,rows:[]};
+      groups[r.sbom_item_id].rows.push(r);
+    });
+
+    let html=`<table><thead><tr><th>CVE</th><th>CVSS</th><th>EPSS</th><th>Severity</th><th>KEV</th><th>Relevance</th><th>Match Reason</th><th>Status</th><th></th></tr></thead><tbody>`;
+    Object.values(groups).forEach(g=>{
+      const r0=g.item;
+      const hasNew=g.rows.some(r=>r.status==='new');
+      html+=`<tr style="background:var(--surface2);">
+        <td colspan="8" style="padding:8px 10px;">
+          <strong>${esc(r0.item_name)}</strong>
+          <span style="font-size:11px;color:var(--muted);margin-left:8px;">${esc(r0.item_vendor)} ${esc(r0.item_version)}</span>
+          ${r0.item_host?`<span style="font-size:11px;color:var(--accent);margin-left:8px;">@ ${esc(r0.item_host)}</span>`:''}
         </td>
-        <td style="font-size:12px;color:var(--accent)">${r.item_host?esc(r.item_host):'<span style="color:var(--muted)">—</span>'}</td>
-        <td><a class="cve-link" href="https://nvd.nist.gov/vuln/detail/${esc(r.cve_id)}" target="_blank">${esc(r.cve_id)}</a></td>
-        <td>${fmtScore(r.cvss_score)}</td>
-        <td>${fmtEpss(r.epss)}</td>
-        <td><span class="badge ${sevCls(r.severity)}">${r.severity||'—'}</span></td>
-        <td>${r.kev?'<span class="badge kev">KEV</span>':''}</td>
-        <td style="font-size:11px;color:var(--muted)">${esc(r.match_reason)}</td>
-        <td><span class="badge ${r.status}">${r.status}</span></td>
-        <td style="white-space:nowrap">
-          ${r.status==='new'?`<button class="btn small" onclick="action(${r.id},'ack')">Ack</button>
-          <button class="btn small" onclick="action(${r.id},'fp')">FP</button>`:''}
-          ${r.status!=='new'?`<button class="btn small" onclick="action(${r.id},'reopen')">Reopen</button>`:''}
+        <td style="background:var(--surface2);text-align:right;padding-right:8px;">
+          ${hasNew&&_filter!=='fp'?`<button class="btn small danger" onclick="fpAll(${r0.sbom_item_id})" title="Mark all open matches for this item as FP (item is patched)">FP All</button>`:''}
         </td>
-      </tr>`).join('')+'</tbody></table>';
+      </tr>`;
+      g.rows.forEach(r=>{
+        html+=`<tr>
+          <td><a class="cve-link" href="https://nvd.nist.gov/vuln/detail/${esc(r.cve_id)}" target="_blank">${esc(r.cve_id)}</a></td>
+          <td>${fmtScore(r.cvss_score)}</td>
+          <td>${fmtEpss(r.epss)}</td>
+          <td><span class="badge ${sevCls(r.severity)}">${r.severity||'—'}</span></td>
+          <td>${r.kev?'<span class="badge kev">KEV</span>':''}</td>
+          <td>${fmtVerdict(r.item_version, r.fix_versions)}</td>
+          <td style="font-size:11px;color:var(--muted)">${esc(r.match_reason)}</td>
+          <td><span class="badge ${r.status}">${r.status}</span></td>
+          <td style="white-space:nowrap">
+            ${r.status==='new'?`<button class="btn small" onclick="action(${r.id},'ack')">Ack</button>
+            <button class="btn small" onclick="action(${r.id},'fp')">FP</button>`:''}
+            ${r.status!=='new'?`<button class="btn small" onclick="action(${r.id},'reopen')">Reopen</button>`:''}
+          </td>
+        </tr>`;
+      });
+    });
+    html+='</tbody></table>';
+    el.innerHTML=html;
+  }).catch(e=>{
+    const el=document.getElementById('match-table');
+    if(el)el.innerHTML='<div class="empty">Error loading matches: '+e.message+'</div>';
   });
+}
+
+function fpAll(itemId){
+  if(!confirm('Mark all open matches for this item as False Positive? Use this when the software is fully patched.'))return;
+  fetch(`/api/sbom/${itemId}/fp-all`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+    .then(r=>r.json()).then(d=>loadMatches());
 }
 document.addEventListener('DOMContentLoaded', loadMatches);
 </script>

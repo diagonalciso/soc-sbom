@@ -35,6 +35,9 @@ def _migrate(conn):
     if "epss_percentile" not in cve_cols:
         conn.execute("ALTER TABLE cves ADD COLUMN epss_percentile REAL NOT NULL DEFAULT 0.0")
         conn.commit()
+    if "fix_versions" not in cve_cols:
+        conn.execute("ALTER TABLE cves ADD COLUMN fix_versions TEXT NOT NULL DEFAULT '[]'")
+        conn.commit()
 
     if "purl" not in sbom_cols:
         conn.execute("ALTER TABLE sbom_items ADD COLUMN purl TEXT NOT NULL DEFAULT ''")
@@ -91,6 +94,10 @@ def init_db():
             CREATE TABLE IF NOT EXISTS settings (
                 key     TEXT PRIMARY KEY,
                 value   TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS hosts (
+                name    TEXT PRIMARY KEY
             );
 
             CREATE INDEX IF NOT EXISTS idx_matches_status   ON matches(status);
@@ -166,11 +173,25 @@ def get_sbom_items_with_purl():
 
 
 def get_hosts():
-    """Return distinct non-empty host values."""
-    rows = _get_conn().execute(
-        "SELECT DISTINCT host FROM sbom_items WHERE host != '' ORDER BY host"
-    ).fetchall()
+    """Return all registered hosts."""
+    rows = _get_conn().execute("SELECT name FROM hosts ORDER BY name").fetchall()
     return [r[0] for r in rows]
+
+
+def add_host(name):
+    with _get_conn() as conn:
+        try:
+            conn.execute("INSERT INTO hosts (name) VALUES (?)", (name.strip(),))
+            conn.commit()
+            return True
+        except Exception:
+            return False
+
+
+def delete_host(name):
+    with _get_conn() as conn:
+        conn.execute("DELETE FROM hosts WHERE name=?", (name,))
+        conn.commit()
 
 
 def delete_sbom_item(item_id):
@@ -213,11 +234,11 @@ def update_epss_scores(scores: dict):
 # CVEs
 # ---------------------------------------------------------------------------
 
-def upsert_cve(cve_id, description, cvss_score, cvss_version, severity, published, modified, source, kev, cpe_list, products):
+def upsert_cve(cve_id, description, cvss_score, cvss_version, severity, published, modified, source, kev, cpe_list, products, fix_versions=None):
     with _get_conn() as conn:
         conn.execute("""
-            INSERT INTO cves (cve_id, description, cvss_score, cvss_version, severity, published, modified, source, kev, cpe_list, products)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO cves (cve_id, description, cvss_score, cvss_version, severity, published, modified, source, kev, cpe_list, products, fix_versions)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(cve_id) DO UPDATE SET
                 description=excluded.description,
                 cvss_score=excluded.cvss_score,
@@ -226,9 +247,11 @@ def upsert_cve(cve_id, description, cvss_score, cvss_version, severity, publishe
                 modified=excluded.modified,
                 kev=MAX(kev, excluded.kev),
                 cpe_list=excluded.cpe_list,
-                products=excluded.products
+                products=excluded.products,
+                fix_versions=CASE WHEN excluded.fix_versions='[]' THEN fix_versions ELSE excluded.fix_versions END
         """, (cve_id, description, cvss_score, cvss_version, severity, published, modified, source,
-              1 if kev else 0, json.dumps(cpe_list), json.dumps(products)))
+              1 if kev else 0, json.dumps(cpe_list), json.dumps(products),
+              json.dumps(fix_versions or [])))
         conn.commit()
 
 
@@ -248,6 +271,61 @@ def get_cves(min_score=0.0, kev_only=False, limit=200):
 def get_cve(cve_id):
     row = _get_conn().execute("SELECT * FROM cves WHERE cve_id=?", (cve_id,)).fetchone()
     return dict(row) if row else None
+
+
+def get_cves_needing_fix_versions(limit=100):
+    """Return CVE IDs that have a CVSS score but no fix version data yet, matched CVEs first."""
+    rows = _get_conn().execute("""
+        SELECT cve_id FROM cves
+        WHERE (fix_versions IS NULL OR fix_versions='[]')
+        ORDER BY CASE WHEN cve_id IN (
+            SELECT DISTINCT cve_id FROM matches WHERE status='new'
+        ) THEN 0 ELSE 1 END, cvss_score DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    return [r[0] for r in rows]
+
+
+def get_cves_needing_enrichment(limit=50, matched_only=False):
+    """Return CVE IDs with score=0 that need NVD enrichment. Matched CVEs first."""
+    if matched_only:
+        rows = _get_conn().execute("""
+            SELECT DISTINCT c.cve_id FROM cves c
+            JOIN matches m ON c.cve_id = m.cve_id
+            WHERE c.cvss_score = 0.0
+            ORDER BY c.cve_id LIMIT ?
+        """, (limit,)).fetchall()
+    else:
+        rows = _get_conn().execute("""
+            SELECT cve_id FROM cves WHERE cvss_score = 0.0
+            ORDER BY CASE WHEN cve_id IN (
+                SELECT DISTINCT cve_id FROM matches
+            ) THEN 0 ELSE 1 END, cve_id
+            LIMIT ?
+        """, (limit,)).fetchall()
+    return [r[0] for r in rows]
+
+
+def update_cve_score(cve_id, cvss_score, cvss_version, severity, cpe_list, products, modified, fix_versions=None):
+    with _get_conn() as conn:
+        conn.execute("""
+            UPDATE cves SET cvss_score=?, cvss_version=?, severity=?,
+                cpe_list=?, products=?, modified=?, fix_versions=?
+            WHERE cve_id=?
+        """, (cvss_score, cvss_version, severity,
+              json.dumps(cpe_list), json.dumps(products), modified,
+              json.dumps(fix_versions or []), cve_id))
+        conn.commit()
+
+
+def purge_unmatched_cves():
+    """Delete CVEs that have no matches (not relevant to any SBOM item)."""
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM cves WHERE cve_id NOT IN (SELECT DISTINCT cve_id FROM matches)"
+        )
+        conn.commit()
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +355,7 @@ def get_matches(status=None, limit=300):
     rows = _get_conn().execute(f"""
         SELECT m.*, s.name as item_name, s.vendor as item_vendor, s.version as item_version,
                s.item_type, s.host as item_host, c.cvss_score, c.severity, c.description as cve_description,
-               c.kev, c.published, c.epss, c.epss_percentile
+               c.kev, c.published, c.epss, c.epss_percentile, c.fix_versions
         FROM matches m
         JOIN sbom_items s ON m.sbom_item_id = s.id
         JOIN cves c ON m.cve_id = c.cve_id
@@ -295,6 +373,16 @@ def update_match_status(match_id, status):
             (status, match_id)
         )
         conn.commit()
+
+
+def bulk_update_matches_for_item(sbom_item_id, from_status, to_status):
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE matches SET status=?, updated_at=datetime('now') WHERE sbom_item_id=? AND status=?",
+            (to_status, sbom_item_id, from_status)
+        )
+        conn.commit()
+        return cur.rowcount
 
 
 def get_stats():
