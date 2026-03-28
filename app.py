@@ -81,7 +81,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(200, db.get_stats())
 
         elif path == "/api/sbom":
-            self._json(200, db.get_sbom_items())
+            host_filter = params.get("host", "")
+            self._json(200, db.get_sbom_items(host=host_filter))
+
+        elif path == "/api/hosts":
+            self._json(200, db.get_hosts())
 
         elif path == "/api/cves":
             min_score = float(params.get("min_score", "0"))
@@ -117,6 +121,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body.get("item_type", "application"),
                 body.get("cpe", ""),
                 body.get("purl", ""),
+                body.get("host", ""),
                 body.get("notes", ""),
             )
             feeds.run_matcher()
@@ -132,6 +137,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body.get("item_type", "application"),
                 body.get("cpe", ""),
                 body.get("purl", ""),
+                body.get("host", ""),
                 body.get("notes", ""),
             )
             feeds.run_matcher()
@@ -372,9 +378,12 @@ setInterval(loadDashboard, 60000);
 def _page_sbom():
     return _page_head("SBOM") + _nav("SBOM") + """
 <main>
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
     <h2 style="font-size:16px;font-weight:700;">Software Bill of Materials</h2>
-    <div style="display:flex;gap:8px;">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <select id="host-filter" onchange="loadSBOM()" style="width:auto;font-size:12px;">
+        <option value="">All devices</option>
+      </select>
       <button class="btn" onclick="verifyAll()">✓ Mark All Up to Date</button>
       <button class="btn primary" onclick="openAdd()">+ Add Item</button>
     </div>
@@ -402,6 +411,7 @@ def _page_sbom():
         <option value="other">Other</option>
       </select>
     </div>
+    <div class="form-row"><label>Host / Device</label><input id="f-host" placeholder="e.g. dc01, fw-panos-01, workstation-finance"/></div>
     <div class="form-row"><label>CPE (optional — improves matching for commercial software)</label><input id="f-cpe" placeholder="e.g. cpe:2.3:a:apache:http_server:2.4.51:*:*:*:*:*:*:*"/></div>
     <div class="form-row"><label>purl (optional — improves matching for open source packages)</label><input id="f-purl" placeholder="e.g. pkg:pypi/requests@2.28.0 or pkg:npm/lodash@4.17.21"/></div>
     <div class="form-row"><label>Notes</label><textarea id="f-notes" rows="2" placeholder="Optional notes"></textarea></div>
@@ -415,11 +425,21 @@ def _page_sbom():
 <script>
 let _editId = null;
 
+function loadHosts(){
+  fetch('/api/hosts').then(r=>r.json()).then(hosts=>{
+    const sel=document.getElementById('host-filter');
+    const cur=sel.value;
+    sel.innerHTML='<option value="">All devices</option>'+hosts.map(h=>`<option value="${esc(h)}"${h===cur?' selected':''}>${esc(h)}</option>`).join('');
+  });
+}
+
 function loadSBOM(){
-  fetch('/api/sbom').then(r=>r.json()).then(rows=>{
+  const host=document.getElementById('host-filter').value;
+  const url='/api/sbom'+(host?'?host='+encodeURIComponent(host):'');
+  fetch(url).then(r=>r.json()).then(rows=>{
     const el=document.getElementById('sbom-table');
-    if(!rows.length){el.innerHTML='<div class="empty">No items yet. Add your first SBOM item.</div>';return;}
-    el.innerHTML=`<table><thead><tr><th>Name</th><th>Vendor</th><th>Version</th><th>Type</th><th>CPE / purl</th><th>Notes</th><th>Verified</th><th></th></tr></thead><tbody>`+
+    if(!rows.length){el.innerHTML='<div class="empty">No items found.</div>';return;}
+    el.innerHTML=`<table><thead><tr><th>Name</th><th>Vendor</th><th>Version</th><th>Type</th><th>Host</th><th>CPE / purl</th><th>Notes</th><th>Verified</th><th></th></tr></thead><tbody>`+
       rows.map(r=>{
         const verified=r.verified_at?(new Date(r.verified_at+'Z').toLocaleDateString()):'<span style="color:var(--red);font-weight:700">Never</span>';
         const ident=r.purl?`<span title="${esc(r.purl)}" style="color:var(--purple)">${esc(r.purl.substring(0,40))}${r.purl.length>40?'…':''}</span>`:
@@ -429,12 +449,13 @@ function loadSBOM(){
         <td style="color:var(--muted)">${esc(r.vendor)}</td>
         <td style="font-size:12px">${esc(r.version)||'—'}</td>
         <td><span class="type-badge">${esc(r.item_type)}</span></td>
-        <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ident}</td>
+        <td style="font-size:12px;color:var(--accent)">${r.host?esc(r.host):'<span style="color:var(--muted)">—</span>'}</td>
+        <td style="font-size:11px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ident}</td>
         <td style="font-size:12px;color:var(--muted)">${esc(r.notes)||'—'}</td>
         <td style="font-size:11px;white-space:nowrap">${verified}</td>
         <td style="white-space:nowrap">
           <button class="btn small" onclick="verifyItem(${r.id})">✓</button>
-          <button class="btn small" onclick="openEdit(${r.id},'${esc(r.name)}','${esc(r.vendor)}','${esc(r.version)}','${r.item_type}','${esc(r.cpe)}','${esc(r.purl||'')}','${esc(r.notes)}')">Edit</button>
+          <button class="btn small" onclick="openEdit(${r.id},'${esc(r.name)}','${esc(r.vendor)}','${esc(r.version)}','${r.item_type}','${esc(r.cpe)}','${esc(r.purl||'')}','${esc(r.host||'')}','${esc(r.notes)}')">Edit</button>
           <button class="btn small danger" onclick="delItem(${r.id})">Delete</button>
         </td>
       </tr>`;}).join('')+'</tbody></table>';
@@ -444,14 +465,14 @@ function loadSBOM(){
 function openAdd(){
   _editId=null;
   document.getElementById('modal-title').textContent='Add SBOM Item';
-  ['name','vendor','version','cpe','purl','notes'].forEach(f=>document.getElementById('f-'+f).value='');
+  ['name','vendor','version','cpe','purl','host','notes'].forEach(f=>document.getElementById('f-'+f).value='');
   document.getElementById('f-type').value='application';
   document.getElementById('edit-id').value='';
   document.getElementById('modal').classList.add('show');
   document.getElementById('f-name').focus();
 }
 
-function openEdit(id,name,vendor,version,type,cpe,purl,notes){
+function openEdit(id,name,vendor,version,type,cpe,purl,host,notes){
   _editId=id;
   document.getElementById('modal-title').textContent='Edit SBOM Item';
   document.getElementById('f-name').value=name;
@@ -460,6 +481,7 @@ function openEdit(id,name,vendor,version,type,cpe,purl,notes){
   document.getElementById('f-type').value=type;
   document.getElementById('f-cpe').value=cpe;
   document.getElementById('f-purl').value=purl;
+  document.getElementById('f-host').value=host;
   document.getElementById('f-notes').value=notes;
   document.getElementById('modal').classList.add('show');
 }
@@ -474,6 +496,7 @@ function saveItem(){
     item_type:document.getElementById('f-type').value,
     cpe:document.getElementById('f-cpe').value.trim(),
     purl:document.getElementById('f-purl').value.trim(),
+    host:document.getElementById('f-host').value.trim(),
     notes:document.getElementById('f-notes').value.trim(),
   };
   if(!payload.name||!payload.vendor){alert('Name and vendor are required.');return;}
@@ -496,7 +519,7 @@ function verifyAll(){
   fetch('/api/sbom/verify-all',{method:'POST'}).then(()=>loadSBOM());
 }
 
-document.addEventListener('DOMContentLoaded', loadSBOM);
+document.addEventListener('DOMContentLoaded', ()=>{loadHosts();loadSBOM();});
 document.getElementById('modal').addEventListener('click', function(e){if(e.target===this)closeModal();});
 </script>
 """ + FOOTER
@@ -585,12 +608,13 @@ function loadMatches(){
   fetch('/api/matches?status='+_filter).then(r=>r.json()).then(rows=>{
     const el=document.getElementById('match-table');
     if(!rows.length){el.innerHTML='<div class="empty">No matches.</div>';return;}
-    el.innerHTML=`<table><thead><tr><th>SBOM Item</th><th>CVE</th><th>CVSS</th><th>EPSS</th><th>Severity</th><th>KEV</th><th>Match Reason</th><th>Status</th><th></th></tr></thead><tbody>`+
+    el.innerHTML=`<table><thead><tr><th>SBOM Item</th><th>Host</th><th>CVE</th><th>CVSS</th><th>EPSS</th><th>Severity</th><th>KEV</th><th>Match Reason</th><th>Status</th><th></th></tr></thead><tbody>`+
       rows.map(r=>`<tr>
         <td>
           <strong>${esc(r.item_name)}</strong><br>
           <span style="font-size:11px;color:var(--muted)">${esc(r.item_vendor)} ${esc(r.item_version)}</span>
         </td>
+        <td style="font-size:12px;color:var(--accent)">${r.item_host?esc(r.item_host):'<span style="color:var(--muted)">—</span>'}</td>
         <td><a class="cve-link" href="https://nvd.nist.gov/vuln/detail/${esc(r.cve_id)}" target="_blank">${esc(r.cve_id)}</a></td>
         <td>${fmtScore(r.cvss_score)}</td>
         <td>${fmtEpss(r.epss)}</td>
