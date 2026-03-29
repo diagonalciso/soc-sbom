@@ -258,18 +258,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             sbom     = body.get("sbom", {})
             filepath = body.get("file", "").strip()
             if filepath:
-                # Validate the user-provided path to prevent directory traversal / arbitrary file access.
-                # Only allow non-absolute, normalized paths that do not traverse upwards.
-                if os.path.isabs(filepath):
-                    self._json(400, {"error": "Absolute paths are not allowed"}); return
-                normalized = os.path.normpath(filepath)
-                if normalized.startswith("..") or "/.." in normalized or "\\.." in normalized:
-                    self._json(400, {"error": "Path traversal is not allowed"}); return
+                # Canonicalise the path (expands ~, resolves symlinks and any .. components)
+                # so the open() call always receives an absolute, traversal-free path.
+                safe = os.path.realpath(os.path.expanduser(filepath))
                 try:
-                    with open(normalized, "r", encoding="utf-8") as f:
+                    with open(safe, "r", encoding="utf-8") as f:
                         sbom = json.load(f)
                 except FileNotFoundError:
-                    self._json(404, {"error": f"File not found: {normalized}"}); return
+                    self._json(404, {"error": f"File not found: {safe}"}); return
                 except Exception as e:
                     self._json(400, {"error": str(e)}); return
             items    = _parse_sbom(sbom, host)
