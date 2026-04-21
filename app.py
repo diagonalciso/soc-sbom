@@ -185,6 +185,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "osv_last_run":  db.get_setting("osv_last_run",  "never"),
             })
 
+        elif path == "/api/docs/user-manual":
+            try:
+                import os
+                manual_path = os.path.join(os.path.dirname(__file__), "SBOMGUARD_USER_MANUAL.html")
+                if os.path.exists(manual_path):
+                    with open(manual_path, "rb") as f:
+                        self._send(200, f.read())
+                else:
+                    self._json(404, {"error": "Manual not found"})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+
         else:
             self._send(404, "Not found")
 
@@ -391,6 +403,7 @@ def _nav(active):
   <div><div class="app-name">SBOMguard</div><div class="app-sub">Vulnerability Monitor</div></div>
   <nav>{items}</nav>
   <div class="hdr-right">
+    <button class="btn small" onclick="window.open('/api/docs/user-manual', '_blank')" title="User Manual">📖 Help</button>
     <span id="feed-status" class="feed-status">Loading…</span>
     <button class="btn small" onclick="runFeed()" title="Run feed now">↻ Refresh</button>
   </div>
