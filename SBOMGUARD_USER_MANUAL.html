@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SBOMguard User Manual</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 40px; }
+        h1 { color: #d32f2f; border-bottom: 3px solid #d32f2f; padding-bottom: 15px; margin-bottom: 30px; font-size: 2.5em; }
+        h2 { color: #e53935; margin-top: 40px; margin-bottom: 20px; padding-left: 10px; border-left: 4px solid #e53935; }
+        h3 { color: #f44336; margin-top: 25px; margin-bottom: 15px; }
+        p { margin-bottom: 15px; }
+        ul, ol { margin-left: 30px; margin-bottom: 15px; }
+        li { margin-bottom: 10px; }
+        code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-family: 'Courier New', monospace; color: #d32f2f; }
+        pre { background: #f5f5f5; border: 1px solid #ddd; border-radius: 5px; padding: 15px; overflow-x: auto; margin-bottom: 15px; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background: #f0f0f0; color: #d32f2f; font-weight: bold; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        .note { background: #fff3cd; border-left: 4px solid #ff9800; padding: 15px; margin: 20px 0; border-radius: 3px; }
+    </style>
+</head>
+<body>
+<div class="container">
+
+<h1>📦 SBOMguard User Manual</h1>
+<p style="font-size: 1.1em; color: #666; margin-bottom: 30px;">SBOM vulnerability tracker and CVE monitor</p>
+
+<h2>Overview</h2>
+<p>SBOMguard monitors Software Bill of Materials (SBOM) files for known vulnerabilities. Upload SBOM JSON, scan against NVD, KEV, EPSS, and OSV databases, track remediation.</p>
+
+<h2>Getting Started</h2>
+<ol>
+    <li>Navigate to <code>http://localhost:8082</code></li>
+    <li>Upload SBOM file (JSON format) via web UI</li>
+    <li>View vulnerability scan results</li>
+    <li>Filter by CVSS threshold, severity, status</li>
+    <li>Track remediation progress</li>
+</ol>
+
+<h2>Uploading SBOMs</h2>
+<p>Click "Upload SBOM" and select JSON file. Supported formats:</p>
+<ul>
+    <li>CYCLONEDX (CycloneDX)</li>
+    <li>SPDX (SPDX 2.1+)</li>
+    <li>Generic JSON with package/version fields</li>
+</ul>
+
+<h2>Vulnerability Scanning</h2>
+<p>SBOMguard automatically scans uploads against:</p>
+<ul>
+    <li><strong>NVD</strong> — National Vulnerability Database (all CVEs)</li>
+    <li><strong>CISA KEV</strong> — Known Exploited Vulnerabilities (actively exploited)</li>
+    <li><strong>EPSS</strong> — Exploit Prediction Scoring System (exploitation likelihood)</li>
+    <li><strong>OSV</strong> — Open Source Vulnerabilities</li>
+</ul>
+
+<h2>Filtering & Sorting</h2>
+<ul>
+    <li><strong>CVSS Threshold:</strong> Show only vulnerabilities above score (0-10)</li>
+    <li><strong>Severity:</strong> Critical, High, Medium, Low, Info</li>
+    <li><strong>Status:</strong> Open, Remediated, Waived, In Progress</li>
+    <li><strong>Sort:</strong> By CVSS, EPSS, date discovered, status</li>
+</ul>
+
+<h2>Remediation Tracking</h2>
+<p>Mark vulnerabilities as:</p>
+<ul>
+    <li><strong>Open</strong> — Not yet addressed</li>
+    <li><strong>In Progress</strong> — Patch pending/testing</li>
+    <li><strong>Remediated</strong> — Fixed in latest version</li>
+    <li><strong>Waived</strong> — Accepted risk</li>
+</ul>
+
+<h2>Export & Reporting</h2>
+<p>Export scan results as CSV or JSON for compliance reporting.</p>
+
+<h2>FAQ</h2>
+<p><strong>Q: How often are CVE databases updated?</strong><br>A: Daily. New vulnerabilities added to NVD/KEV within 24 hours.</p>
+<p><strong>Q: Can I upload multiple SBOMs?</strong><br>A: Yes. Each SBOM tracked separately with history.</p>
+<p><strong>Q: What's EPSS?</strong><br>A: Exploit Prediction Scoring System—likelihood exploit will be released (0-1 scale).</p>
+
+</div>
+</body>
+</html>
