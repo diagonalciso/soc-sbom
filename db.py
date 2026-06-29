@@ -165,6 +165,16 @@ def update_sbom_item(item_id, name, vendor, version, item_type, cpe, purl, host,
         conn.commit()
 
 
+def set_item_cpe(item_id, cpe):
+    """Set just the CPE of an SBOM item (used by the CPE backfill)."""
+    with _get_conn() as conn:
+        conn.execute(
+            "UPDATE sbom_items SET cpe=?, updated_at=datetime('now') WHERE id=?",
+            (cpe.strip(), item_id)
+        )
+        conn.commit()
+
+
 def get_sbom_items_with_purl():
     rows = _get_conn().execute(
         "SELECT * FROM sbom_items WHERE active=1 AND purl != '' ORDER BY vendor, name"

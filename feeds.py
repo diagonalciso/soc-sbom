@@ -464,6 +464,73 @@ def _matches_sbom_item(item, cve_products, cve_cpe_list):
     return False, ""
 
 
+def _cpe_token(s):
+    """Normalize a vendor/product string to a CPE 2.3 component token.
+    Lowercase, collapse non-alphanumerics to '_', strip edge underscores.
+    'HTTP Server' -> 'http_server', 'Apache Software Foundation' -> 'apache_software_foundation'."""
+    return re.sub(r"[^a-z0-9]+", "_", (s or "").lower()).strip("_")
+
+
+def _build_cpe_dictionary(conn_cves):
+    """From the CVE corpus, build product_token -> set(vendor_token) seen in real CPE criteria.
+    This is the authoritative dictionary we validate backfilled CPEs against, so we never
+    invent a vendor/product pair that no CVE actually uses."""
+    prod_to_vendors = {}
+    for row in conn_cves:
+        for cpe in json.loads(row["cpe_list"] or "[]"):
+            parts = cpe.split(":")
+            if len(parts) < 5:
+                continue
+            vendor, product = parts[3].lower(), parts[4].lower()
+            if not vendor or not product or vendor == "*" or product == "*":
+                continue
+            prod_to_vendors.setdefault(product, set()).add(vendor)
+    return prod_to_vendors
+
+
+def backfill_cpes():
+    """Derive a CPE for active SBOM items that lack one, but ONLY when the
+    (vendor, product) pair is corroborated by real CVE CPE data. This lets the
+    precise CPE-match path fire for commercial software and disambiguates
+    products whose bare name is shared across vendors (e.g. cvs/cvs vs distrotech/cvs).
+    Conservative: writes nothing when the product is unknown or the vendor is ambiguous."""
+    items = db.get_sbom_items(active_only=True)
+    if not items:
+        return 0
+    conn_cves = db._get_conn().execute("SELECT cpe_list FROM cves").fetchall()
+    prod_to_vendors = _build_cpe_dictionary(conn_cves)
+
+    filled = 0
+    for item in items:
+        if (item["cpe"] or "").strip():
+            continue
+        prod_tok = _cpe_token(item["name"])
+        vendors = prod_to_vendors.get(prod_tok)
+        if not prod_tok or not vendors:
+            continue  # product not in CVE CPE dictionary — leave to name matching
+
+        vendor_tok = _cpe_token(item.get("vendor", ""))
+        chosen = None
+        if vendor_tok and vendor_tok in vendors:
+            chosen = vendor_tok                           # exact vendor token match
+        elif vendor_tok:
+            # word-overlap against authoritative vendors (e.g. 'apache software foundation' ~ 'apache')
+            cand = [v for v in vendors
+                    if _word_in(v.replace("_", " "), vendor_tok.replace("_", " "))
+                    or _word_in(vendor_tok.replace("_", " "), v.replace("_", " "))]
+            if len(cand) == 1:
+                chosen = cand[0]
+        if chosen is None and len(vendors) == 1:
+            chosen = next(iter(vendors))                  # unambiguous: single known vendor
+
+        if chosen:
+            db.set_item_cpe(item["id"], f"cpe:2.3:a:{chosen}:{prod_tok}")
+            filled += 1
+
+    print(f"[backfill] set CPE on {filled} SBOM items")
+    return filled
+
+
 def run_matcher():
     """Cross-reference all active SBOM items against all CVEs and record matches."""
     items = db.get_sbom_items(active_only=True)
@@ -577,6 +644,7 @@ def run_all():
     fetch_osv()
     enrich_cve_scores(limit=100)
     enrich_fix_versions(limit=100)
+    backfill_cpes()
     run_matcher()
     purged = db.purge_unmatched_cves()
     if purged:
