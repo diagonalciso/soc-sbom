@@ -392,8 +392,30 @@ def _normalize(s):
     return s
 
 
+def _word_in(needle, haystack):
+    """Whole-word containment: needle appears in haystack on word boundaries.
+    Inputs are already _normalize()d (space-separated tokens, lowercased).
+    Avoids substring collisions like 'ed' inside 'fedora'."""
+    return f" {needle} " in f" {haystack} "
+
+
 def _matches_sbom_item(item, cve_products, cve_cpe_list):
-    """Return (matched, reason) for a SBOM item against a CVE's product/CPE data."""
+    """Return (matched, reason) for a SBOM item against a CVE's product/CPE data.
+
+    Matching is deliberately conservative to avoid false positives. The old
+    logic used raw substring containment in both directions, so a 2-char item
+    like 'ed' matched every CVE whose product contained 'ed' (fedora, edge,
+    advanced, ...). Rules now:
+      - CPE substring match wins (most precise).
+      - Product name must match on WHOLE-WORD boundaries, not raw substring.
+      - Fuzzy (one phrase contained in the other) requires both names >= 4 chars
+        AND a vendor match.
+      - Exact name equality of length >= 4 is accepted on its own.
+      - Short exact names (< 4 chars) are accepted only when the item has no
+        vendor set, or its vendor matches — too ambiguous otherwise.
+    Version-range / patched-vs-affected verdict is computed separately in the UI
+    from the CVE fix_versions, so this stage only establishes product identity.
+    """
 
     # 1. CPE exact match (most precise)
     if item.get("cpe"):
@@ -402,20 +424,41 @@ def _matches_sbom_item(item, cve_products, cve_cpe_list):
             if item_cpe in cpe.lower():
                 return True, f"CPE match: {item_cpe}"
 
-    # 2. Vendor + product fuzzy match
+    # 2. Vendor + product name match (word-boundary aware)
     item_name   = _normalize(item["name"])
     item_vendor = _normalize(item.get("vendor", ""))
+    if not item_name:
+        return False, ""
 
     for p in cve_products:
         prod   = _normalize(p.get("product", ""))
         vendor = _normalize(p.get("vendor", ""))
+        if not prod:
+            continue
 
-        # product name contained in item name or vice versa
-        name_hit = prod and (prod in item_name or item_name in prod)
-        # vendor match (if item has vendor set)
-        vendor_hit = (not item_vendor) or (vendor and (vendor in item_vendor or item_vendor in vendor))
+        exact = prod == item_name
+        fuzzy = (
+            not exact
+            and len(item_name) >= 4 and len(prod) >= 4
+            and (_word_in(item_name, prod) or _word_in(prod, item_name))
+        )
+        if not (exact or fuzzy):
+            continue
 
-        if name_hit and vendor_hit:
+        vendor_match = bool(item_vendor) and bool(vendor) and (
+            vendor == item_vendor
+            or _word_in(vendor, item_vendor)
+            or _word_in(item_vendor, vendor)
+        )
+
+        if exact and len(item_name) >= 4:
+            ok = True                       # strong: full product name, >=4 chars
+        elif exact:
+            ok = (not item_vendor) or vendor_match   # short exact: block only on vendor conflict
+        else:
+            ok = vendor_match               # fuzzy: must be corroborated by vendor
+
+        if ok:
             return True, f"Product match: {p.get('vendor','')} / {p.get('product','')}"
 
     return False, ""
