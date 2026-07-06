@@ -400,7 +400,7 @@ def _nav(active):
     return f"""
 <header>
   <div class="logo">SG</div>
-  <div><div class="app-name">SBOMguard</div><div class="app-sub">Vulnerability Monitor</div></div>
+  <div><div class="app-name">Soc-Sbom</div><div class="app-sub">SBOMguard · Vulnerability Monitor</div></div>
   <nav>{items}</nav>
   <div class="hdr-right">
     <button class="btn small" onclick="window.open('/api/docs/user-manual', '_blank')" title="User Manual">📖 Help</button>
@@ -464,7 +464,7 @@ def _page_head(title):
 <html lang="en"><head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>SBOMguard — {title}</title>
+<title>Soc-Sbom — {title}</title>
 <style>{CSS}</style>
 </head><body>"""
 
