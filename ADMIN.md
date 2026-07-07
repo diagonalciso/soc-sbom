@@ -17,7 +17,7 @@ SBOMguard is a **SBOM vulnerability tracker**. An SBOM (Software Bill of Materia
 ### Setup
 
 ```bash
-cd ~/claude/SBOMguard
+cd ~/soc-sbom
 cp .env.example .env
 nano .env
 
@@ -34,9 +34,9 @@ CVSS_THRESHOLD=7.0         # Alert on CVSS >= 7.0
 python3 app.py
 
 # Or systemd
-sudo cp sbomguard.service /etc/systemd/system/
-sudo systemctl enable --now sbomguard
-sudo journalctl -u sbomguard -f
+sudo cp soc-sbom.service /etc/systemd/system/
+sudo systemctl enable --now soc-sbom
+sudo journalctl -u soc-sbom -f
 ```
 
 ---
@@ -82,19 +82,19 @@ curl -X POST http://localhost:8082/api/sbom/upload \
 
 ## Database
 
-SQLite at `~/claude/SBOMguard/sbomguard.db`
+SQLite at `~/soc-sbom/soc-sbom.db`
 
 ```bash
 # Inspect
-sqlite3 sbomguard.db
+sqlite3 soc-sbom.db
 SELECT COUNT(*) FROM vulnerabilities;
 SELECT * FROM sboms;
 
 # Backup
-cp sbomguard.db sbomguard.db.backup
+cp soc-sbom.db soc-sbom.db.backup
 
 # Clean old SBOMs (>90 days)
-sqlite3 sbomguard.db "DELETE FROM sboms WHERE created_at < datetime('now','-90 days')"
+sqlite3 soc-sbom.db "DELETE FROM sboms WHERE created_at < datetime('now','-90 days')"
 ```
 
 ---
@@ -122,7 +122,7 @@ lsof -i :8082 && kill -9 <PID>
 
 **No vulnerabilities found:**
 - Check SBOM format (CycloneDX/SPDX are supported)
-- Verify feeds loaded: `sqlite3 sbomguard.db "SELECT COUNT(*) FROM cves"`
+- Verify feeds loaded: `sqlite3 soc-sbom.db "SELECT COUNT(*) FROM cves"`
 
 **Slow searches:**
 - Feeds might be updating. Wait 5 min.
@@ -134,11 +134,11 @@ lsof -i :8082 && kill -9 <PID>
 
 ```bash
 # Daily
-cp ~/claude/SBOMguard/sbomguard.db ~/backups/sbomguard-$(date +%Y%m%d).db
+cp ~/soc-sbom/soc-sbom.db ~/backups/soc-sbom-$(date +%Y%m%d).db
 
 # Restore
-cp ~/backups/sbomguard-20260419.db ~/claude/SBOMguard/sbomguard.db
-sudo systemctl restart sbomguard
+cp ~/backups/soc-sbom-20260419.db ~/soc-sbom/soc-sbom.db
+sudo systemctl restart soc-sbom
 ```
 
 ---
@@ -153,7 +153,7 @@ Monitor via web UI:
 
 Check file size:
 ```bash
-du -sh ~/claude/SBOMguard/sbomguard.db
+du -sh ~/soc-sbom/soc-sbom.db
 ```
 
 Typical growth: ~5 MB per month.
@@ -162,7 +162,7 @@ Typical growth: ~5 MB per month.
 
 ## Collection Agents
 
-Optional: Linux/Windows agents in `sbomguard/agents/` automatically generate SBOMs from installed packages.
+Optional: Linux/Windows agents in `soc-sbom/agents/` automatically generate SBOMs from installed packages.
 
 ```bash
 # Linux agent
@@ -172,7 +172,7 @@ Optional: Linux/Windows agents in `sbomguard/agents/` automatically generate SBO
 ./agents/windows-sbom-collector.ps1 > app-sbom.json
 
 # Upload to SBOMguard
-curl -X POST http://sbomguard:8082/api/sbom/upload -F "file=@app-sbom.json"
+curl -X POST http://soc-sbom:8082/api/sbom/upload -F "file=@app-sbom.json"
 ```
 
 Configure cron/Task Scheduler for periodic collection.

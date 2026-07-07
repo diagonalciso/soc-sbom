@@ -129,7 +129,7 @@ Mark vulnerabilities as you fix them:
 
 **Export to CSV:** All vulnerabilities in spreadsheet
 
-**Export to SIEM:** Feed vulnerability data to SOCops/socint
+**Export to SIEM:** Feed vulnerability data to SOCops/soc-intel
 
 **Report template:**
 ```

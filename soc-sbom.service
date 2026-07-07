@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=soc
-WorkingDirectory=$HOME/SBOMguard
-EnvironmentFile=$HOME/SBOMguard/.env
-ExecStart=/usr/bin/python3 $HOME/SBOMguard/app.py
+WorkingDirectory=$HOME/soc-sbom
+EnvironmentFile=$HOME/soc-sbom/.env
+ExecStart=/usr/bin/python3 $HOME/soc-sbom/app.py
 Restart=on-failure
 RestartSec=10
 

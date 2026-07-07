@@ -33,9 +33,9 @@ cp .env.example .env
 python3 app.py
 
 # Or as systemd service
-sudo cp sbomguard.service /etc/systemd/system/
+sudo cp soc-sbom.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now sbomguard
+sudo systemctl enable --now soc-sbom
 ```
 
 Listens on port 8082 (configurable via `.env`). Auto-fetches feeds every 6 hours.
@@ -54,7 +54,7 @@ OSV (open source packages)
          ↓
     Feed worker thread (async HTTP)
          ↓
-    SQLite DB (sbomguard.db)
+    SQLite DB (soc-sbom.db)
          ↓
     HTTP routes (app.py)
          ↓
@@ -308,7 +308,7 @@ After a feed update:
 
 ## Systemd Service
 
-File: `sbomguard.service`
+File: `soc-sbom.service`
 
 ```ini
 [Unit]
@@ -330,10 +330,10 @@ WantedBy=multi-user.target
 
 Install:
 ```bash
-sudo cp sbomguard.service /etc/systemd/system/
+sudo cp soc-sbom.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now sbomguard
-sudo journalctl -u sbomguard -f
+sudo systemctl enable --now soc-sbom
+sudo journalctl -u soc-sbom -f
 ```
 
 ---
@@ -344,7 +344,7 @@ sudo journalctl -u sbomguard -f
 
 Look at stdout/stderr or systemd logs:
 ```bash
-sudo journalctl -u sbomguard -f
+sudo journalctl -u soc-sbom -f
 ```
 
 Feed worker logs lines like:
@@ -357,7 +357,7 @@ Feed worker logs lines like:
 ### Query the Database Directly
 
 ```bash
-sqlite3 sbomguard.db
+sqlite3 soc-sbom.db
 
 # Count CVEs
 > SELECT COUNT(*) FROM cves;
@@ -384,9 +384,9 @@ print(f"Fetched {len(result)} CVEs from NVD")
 
 ### Check WAL File Size
 
-WAL (write-ahead log) can grow large. If `sbomguard.db-wal` is huge, restart the service to trigger a checkpoint:
+WAL (write-ahead log) can grow large. If `soc-sbom.db-wal` is huge, restart the service to trigger a checkpoint:
 ```bash
-sudo systemctl restart sbomguard
+sudo systemctl restart soc-sbom
 ```
 
 ---
@@ -406,4 +406,4 @@ sudo systemctl restart sbomguard
 - **CISA KEV**: Known Exploited Vulnerabilities catalog
 - **OSV**: Open source vulnerability database
 - **SOCops**: Wazuh alert triage (complements SBOMguard for runtime detections)
-- **socint**: Threat intelligence platform (could integrate SBOMguard feeds)
+- **soc-intel**: Threat intelligence platform (could integrate SBOMguard feeds)

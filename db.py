@@ -8,7 +8,7 @@ import os
 import sqlite3
 import threading
 
-DB_PATH = os.environ.get("SBOMGUARD_DB", os.path.join(os.path.dirname(__file__), "sbomguard.db"))
+DB_PATH = os.environ.get("SBOMGUARD_DB", os.path.join(os.path.dirname(__file__), "soc-sbom.db"))
 _local = threading.local()
 
 

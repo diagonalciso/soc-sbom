@@ -78,9 +78,9 @@ python3 app.py
 ### Install as systemd service
 
 ```bash
-sudo cp sbomguard.service /etc/systemd/system/
+sudo cp soc-sbom.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now sbomguard
+sudo systemctl enable --now soc-sbom
 ```
 
 ---
@@ -105,7 +105,7 @@ app.py               HTTP server, all routes, inline HTML pages
 db.py                SQLite schema, migrations, CRUD functions
 feeds.py             NVD, KEV, EPSS, OSV fetchers + SBOM matcher
 .env                 Live configuration
-sbomguard.service    systemd unit file
+soc-sbom.service    systemd unit file
 ```
 
 ---
