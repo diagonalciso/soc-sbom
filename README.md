@@ -115,3 +115,8 @@ sbomguard.service    systemd unit file
 - Python stdlib only (no pip install)
 - SQLite with WAL mode
 - Inline HTML/CSS/JS — single-process, no build step
+
+
+## Documentation
+
+See **[MANUAL.md](MANUAL.md)** for the full manual (overview, configuration, endpoints, integration, troubleshooting). In the running dashboard, click the **`?` Help button** in the top-right corner to open it at `/manual`.
