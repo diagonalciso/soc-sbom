@@ -63,8 +63,8 @@ Example: `pkg:pypi/requests@2.28.0`
 ### Setup
 
 ```bash
-git clone https://github.com/diagonalciso/SBOMguard
-cd SBOMguard
+git clone https://github.com/diagonalciso/soc-sbom
+cd soc-sbom
 cp .env.example .env
 # Edit .env to set port, CVSS threshold, and optionally an NVD API key
 ```
