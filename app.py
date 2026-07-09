@@ -412,7 +412,7 @@ def _nav(active):
 </header>"""
 
 
-FOOTER = """
+FOOTER = r"""
 <script>
 function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML;}
 function fmtScore(n){const cls=n>=9?'critical':n>=7?'high':n>=4?'medium':'low';return`<span class="score ${cls}">${n.toFixed(1)}</span>`;}
