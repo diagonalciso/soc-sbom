@@ -1,5 +1,10 @@
 # SBOMguard
 
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="soc-sbom dashboard screenshot" width="100%">
+</p>
+
 A lightweight, standalone SBOM vulnerability monitoring dashboard. Tracks your software inventory against multiple CVE and exploit intelligence feeds and alerts when a high-severity or actively exploited vulnerability matches something you run.
 
 No external Python dependencies — stdlib only, SQLite, inline HTML/CSS/JS.
